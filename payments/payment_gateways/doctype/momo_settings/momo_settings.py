@@ -6,7 +6,35 @@ from frappe.utils import call_hook_method, get_url
 from urllib.parse import urlencode
 
 from payments.payment_gateways.doctype.momo_settings.momo_connector import MomoConnector
-from payments.utils import create_payment_gateway, create_mode_of_payment
+from payments.utils import create_payment_gateway
+
+
+def create_mode_of_payment(gateway, payment_type="General"):
+    payment_gateway_account = frappe.db.get_value(
+        "Payment Gateway Account", {"payment_gateway": gateway}, "payment_account"
+    )
+    mode_of_payment = frappe.db.exists("Mode of Payment", gateway)
+    if not mode_of_payment and payment_gateway_account:
+        mode_of_payment = frappe.get_doc(
+            {
+                "doctype": "Mode of Payment",
+                "mode_of_payment": gateway,
+                "type": payment_type,
+                "accounts": [
+                    {
+                        "doctype": "Mode of Payment Account",
+                        "company": frappe.db.get_value(
+                            "Account", payment_gateway_account, "company"
+                        ),
+                        "default_account": payment_gateway_account,
+                    }
+                ],
+            }
+        )
+        mode_of_payment.insert(ignore_permissions=True)
+        return mode_of_payment
+    elif mode_of_payment:
+        return frappe.get_doc("Mode of Payment", mode_of_payment)
 
 
 class MoMoSettings(Document):
@@ -112,7 +140,7 @@ def verify_transaction(**kwargs):
     if data.get("status") == "SUCCESSFUL":
         original_user = frappe.session.user
         try:
-            frappe.set_user("Administrator")  # elevate permissions
+            frappe.set_user("Administrator")
             integration_request.handle_success(data)
             integration_request.db_set("status", "Completed")
 

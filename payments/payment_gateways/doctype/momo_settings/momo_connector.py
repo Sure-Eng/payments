@@ -26,11 +26,6 @@ class MomoConnector:
     # -- Authentication -------------------------------------------------------
 
     def authenticate(self):
-        """
-        Obtain a Bearer token.
-        POST /collection/token/
-        Authorization: Basic base64(api_user_id:api_key)
-        """
         url = f"{self.base_url}/collection/token/"
         credentials = base64.b64encode(
             f"{self.api_user_id}:{self.api_key}".encode()
@@ -49,11 +44,6 @@ class MomoConnector:
     def request_to_pay(self, amount, currency, payer_msisdn, external_id,
                        callback_url, payer_message="Payment",
                        payee_note="Thank you"):
-        """
-        Initiate a Request-to-Pay (debit) from the payer's mobile wallet.
-        POST /collection/v1_0/requesttopay
-        Returns {"referenceId": "<uuid>", "status": "PENDING"} on 202.
-        """
         reference_id = str(uuid.uuid4())
         url = f"{self.base_url}/collection/v1_0/requesttopay"
         headers = {
@@ -65,7 +55,7 @@ class MomoConnector:
             "Content-Type": "application/json",
         }
         payload = {
-            "amount": str(amount),  # MTN requires a string
+            "amount": str(amount),
             "currency": currency,
             "externalId": external_id or reference_id,
             "payer": {
@@ -75,16 +65,27 @@ class MomoConnector:
             "payerMessage": payer_message,
             "payeeNote": payee_note,
         }
+
+        import frappe
+        frappe.logger().info(f"MoMo requesttopay payload: {payload}")
+        frappe.logger().info(f"MoMo requesttopay headers (safe): X-Reference-Id={reference_id}, X-Target-Environment={self.target_environment}, currency={currency}, amount={payload['amount']}")
+
         response = requests.post(url, headers=headers, json=payload)
+
+        frappe.logger().info(f"MoMo response status: {response.status_code}")
+        frappe.logger().info(f"MoMo response body: {response.text}")
+
         if response.status_code == 202:
             return {"referenceId": reference_id, "status": "PENDING"}
+
+        # Log full response before raising so we can see MTN's error body
+        frappe.log_error(
+            f"MTN API Error\nStatus: {response.status_code}\nBody: {response.text}\nPayload: {payload}",
+            "MoMo requesttopay Failed"
+        )
         response.raise_for_status()
 
     def get_transaction_status(self, reference_id):
-        """
-        Poll the status of a previously initiated Request-to-Pay.
-        GET /collection/v1_0/requesttopay/{referenceId}
-        """
         url = f"{self.base_url}/collection/v1_0/requesttopay/{reference_id}"
         headers = {
             "Authorization": f"Bearer {self.access_token}",
