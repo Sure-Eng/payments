@@ -281,8 +281,8 @@ def retry_payment_request(payment_request_name):
         last_attempt = last_ir[0].modified
         now = frappe.utils.now_datetime()
         seconds_since = (now - last_attempt).total_seconds()
-        if seconds_since < 60:
-            wait = int(60 - seconds_since)
+        if seconds_since < 180:
+            wait = int(180 - seconds_since)
             frappe.throw(
                 _(f"Please wait {wait} seconds before retrying. MTN requires a cooldown between payment attempts."),
                 title=_("Too Soon")
@@ -295,3 +295,32 @@ def retry_payment_request(payment_request_name):
 
     # Reuse the exact same path as on_submit -> request_phone_payment
     pr.request_phone_payment()
+
+
+@frappe.whitelist()
+def get_retry_cooldown(payment_request_name):
+    """
+    Returns remaining cooldown seconds for the Try Again button.
+    Computed server-side to avoid client timezone issues.
+    """
+    COOLDOWN = 180  # 3 minutes
+    last_ir = frappe.get_all(
+        "Integration Request",
+        filters={
+            "reference_doctype": "Payment Request",
+            "reference_docname": payment_request_name,
+            "status": "Failed",
+        },
+        fields=["modified"],
+        order_by="creation desc",
+        limit=1,
+    )
+    if not last_ir:
+        return {"remaining": 0}
+
+    import datetime
+    last_modified = last_ir[0].modified
+    now = frappe.utils.now_datetime()
+    seconds_since = (now - last_modified).total_seconds()
+    remaining = max(0, int(COOLDOWN - seconds_since))
+    return {"remaining": remaining}

@@ -2,8 +2,9 @@ frappe.ui.form.on("Payment Request", {
     onload: function (frm) {
         frm.momo_polling_interval = null;
         frm.momo_polling_count = 0;
-        frm.momo_max_polls = 24; // 24 * 5s = 120 seconds
+        frm.momo_max_polls = 24;
         frm.momo_cooldown_interval = null;
+        frm.MOMO_COOLDOWN_SECONDS = 180;
 
         frm.momo_start_polling = function () {
             if (frm.momo_polling_interval) return;
@@ -49,9 +50,12 @@ frappe.ui.form.on("Payment Request", {
         };
 
         frm.momo_start_cooldown = function (seconds, btn) {
-            // Disable the button and show countdown
             if (frm.momo_cooldown_interval) clearInterval(frm.momo_cooldown_interval);
-            let remaining = seconds;
+            let remaining = Math.min(Math.max(Math.floor(seconds), 0), frm.MOMO_COOLDOWN_SECONDS);
+            if (remaining <= 0) {
+                btn.prop("disabled", false).text(__("Try Again"));
+                return;
+            }
             btn.prop("disabled", true).text(__("Try Again ({0}s)", [remaining]));
             frm.momo_cooldown_interval = setInterval(function () {
                 remaining--;
@@ -107,7 +111,6 @@ frappe.ui.form.on("Payment Request", {
             );
 
             frm.add_custom_button(__("Try Again"), function () {
-                const btn = frm.get_field ? $(frm.page.btn_secondary) : $();
                 frappe.confirm(
                     __("Resend the MTN MoMo payment prompt to {0}?", [frm.doc.phone_number]),
                     function () {
@@ -120,15 +123,14 @@ frappe.ui.form.on("Payment Request", {
                                 if (!r.exc) {
                                     frappe.msgprint({
                                         title: __("Payment Request Resent"),
-                                        message: __("A new MTN MoMo prompt has been sent to <strong>{0}</strong>. Please ask the customer to confirm.", [frm.doc.phone_number]),
+                                        message: __("A new MTN MoMo prompt has been sent to <strong>{0}</strong>. Please ask the customer to check their phone and enter their PIN to confirm payment.", [frm.doc.phone_number]),
                                         indicator: "blue",
                                     });
                                     frm.reload_doc();
                                 } else {
-                                    // Start 60s cooldown on the button if server threw Too Soon
                                     const try_again_btn = frm.custom_buttons[__("Try Again")];
                                     if (try_again_btn) {
-                                        frm.momo_start_cooldown(60, try_again_btn);
+                                        frm.momo_start_cooldown(frm.MOMO_COOLDOWN_SECONDS, try_again_btn);
                                     }
                                 }
                             },
@@ -137,29 +139,22 @@ frappe.ui.form.on("Payment Request", {
                 );
             }, __("MoMo"));
 
-            // Auto-start 60s cooldown if last IR failed very recently
-            frappe.db.get_list("Integration Request", {
-                filters: {
-                    reference_doctype: "Payment Request",
-                    reference_docname: frm.doc.name,
-                    status: "Failed",
-                },
-                fields: ["modified"],
-                order_by: "creation desc",
-                limit: 1,
-            }).then(function (results) {
-                if (!results || results.length === 0) return;
-                const last_modified = new Date(results[0].modified + " UTC");
-                const now = new Date();
-                const seconds_since = Math.floor((now - last_modified) / 1000);
-                const remaining = 60 - seconds_since;
-                if (remaining > 0) {
-                    const try_again_btn = frm.custom_buttons[__("Try Again")];
-                    if (try_again_btn) {
-                        frm.momo_start_cooldown(remaining, try_again_btn);
+            // Disable immediately, then resolve state from server
+            const try_again_btn = frm.custom_buttons[__("Try Again")];
+            if (try_again_btn) {
+                try_again_btn.prop("disabled", true).text(__("Try Again (checking...)"));
+                frappe.call({
+                    method: "payments.payment_gateways.doctype.momo_settings.momo_settings.get_retry_cooldown",
+                    args: { payment_request_name: frm.doc.name },
+                    callback: function (r) {
+                        if (r.message && r.message.remaining > 0) {
+                            frm.momo_start_cooldown(r.message.remaining, try_again_btn);
+                        } else {
+                            try_again_btn.prop("disabled", false).text(__("Try Again"));
+                        }
                     }
-                }
-            });
+                });
+            }
         }
     },
 

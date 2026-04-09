@@ -55,7 +55,7 @@ class MomoConnector:
             "Content-Type": "application/json",
         }
         payload = {
-            "amount": str(amount),
+            "amount": str(int(float(amount))),
             "currency": currency,
             "externalId": external_id or reference_id,
             "payer": {
