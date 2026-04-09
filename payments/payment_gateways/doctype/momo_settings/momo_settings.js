@@ -4,7 +4,6 @@ frappe.ui.form.on("MoMo Settings", {
         frm.set_df_property("callback_url", "read_only", 1);
 
         if (!frm.doc.__islocal) {
-            // -- Test Connection button
             frm.add_custom_button(__("Test Connection"), function () {
                 frappe.confirm(
                     __("This will make a live API call to MTN MoMo to verify your credentials. Continue?"),
@@ -22,18 +21,15 @@ frappe.ui.form.on("MoMo Settings", {
                                 if (!r.exc) {
                                     frappe.msgprint({
                                         title: __("Connection Successful"),
-                                        message: __("MTN MoMo credentials are valid. Response: ")
-                                            + JSON.stringify(r.message || {}),
+                                        message: __("MTN MoMo credentials are valid."),
                                         indicator: "green",
                                     });
                                 }
                             },
-                            error: function (r) {
+                            error: function () {
                                 frappe.msgprint({
                                     title: __("Connection Failed"),
-                                    message: __(
-                                        "Could not connect to MTN MoMo. Check API User ID, API Key, and Subscription Key. See Error Log for details."
-                                    ),
+                                    message: __("Could not connect to MTN MoMo. Check credentials and Error Log."),
                                     indicator: "red",
                                 });
                             },
@@ -43,13 +39,9 @@ frappe.ui.form.on("MoMo Settings", {
             }, __("MTN MoMo"));
         }
 
-        // Sandbox warning banner
         if (frm.doc.use_sandbox) {
             frm.dashboard.set_headline_alert(
-                __(
-                    "Sandbox mode is ON. Payments are not real. "
-                    + "Switch off 'Use Sandbox' and set Target Environment for production."
-                ),
+                __("Sandbox mode is ON. Payments are not real. Switch off 'Use Sandbox' and set Target Environment for production."),
                 "orange"
             );
         }

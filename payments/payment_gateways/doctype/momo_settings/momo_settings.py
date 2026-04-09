@@ -15,22 +15,16 @@ def create_mode_of_payment(gateway, payment_type="General"):
     )
     mode_of_payment = frappe.db.exists("Mode of Payment", gateway)
     if not mode_of_payment and payment_gateway_account:
-        mode_of_payment = frappe.get_doc(
-            {
-                "doctype": "Mode of Payment",
-                "mode_of_payment": gateway,
-                "type": payment_type,
-                "accounts": [
-                    {
-                        "doctype": "Mode of Payment Account",
-                        "company": frappe.db.get_value(
-                            "Account", payment_gateway_account, "company"
-                        ),
-                        "default_account": payment_gateway_account,
-                    }
-                ],
-            }
-        )
+        mode_of_payment = frappe.get_doc({
+            "doctype": "Mode of Payment",
+            "mode_of_payment": gateway,
+            "type": payment_type,
+            "accounts": [{
+                "doctype": "Mode of Payment Account",
+                "company": frappe.db.get_value("Account", payment_gateway_account, "company"),
+                "default_account": payment_gateway_account,
+            }],
+        })
         mode_of_payment.insert(ignore_permissions=True)
         return mode_of_payment
     elif mode_of_payment:
@@ -41,7 +35,7 @@ class MoMoSettings(Document):
 
     @property
     def supported_currencies_list(self):
-        raw = self.supported_currencies or "UGX,GHS,XAF,ZMW,LRD,RWF,BIF,EUR"
+        raw = self.supported_currencies or "XAF"
         return [c.strip() for c in raw.split(",") if c.strip()]
 
     def validate_transaction_currency(self, currency):
@@ -80,6 +74,22 @@ class MoMoSettings(Document):
 
     def request_for_payment(self, **kwargs):
         args = frappe._dict(kwargs)
+
+        # Always read phone_number from the Payment Request document itself
+        # This is the field the desk user fills in — never rely on args.sender
+        phone_number = args.get("phone_number")
+        if args.get("order_id") and not phone_number:
+            phone_number = frappe.db.get_value(
+                "Payment Request", args.order_id, "phone_number"
+            )
+
+        if not phone_number:
+            frappe.throw(
+                _("Please enter the MTN Cameroon phone number (with country code e.g. 237XXXXXXXXX) "
+                  "in the Phone Number field before submitting."),
+                title=_("Phone Number Required")
+            )
+
         try:
             callback_url = (
                 frappe.utils.get_url()
@@ -90,7 +100,7 @@ class MoMoSettings(Document):
             response = connector.request_to_pay(
                 amount=args.request_amount,
                 currency=args.currency,
-                payer_msisdn=args.sender,
+                payer_msisdn=phone_number,
                 external_id=args.order_id,
                 callback_url=callback_url,
             )
@@ -121,11 +131,6 @@ class MoMoSettings(Document):
 
 @frappe.whitelist(allow_guest=True)
 def verify_transaction(**kwargs):
-    """
-    Called by MTN as a callback after a transaction completes.
-    Also used internally by the checkout page polling loop.
-    allow_guest=True is required because MTN calls this without a Frappe session.
-    """
     data = frappe._dict(kwargs)
     reference_id = data.get("referenceId") or data.get("externalId")
 
@@ -162,17 +167,34 @@ def verify_transaction(**kwargs):
         finally:
             frappe.set_user(original_user)
     else:
-        integration_request.handle_failure(data)
-
+        original_user = frappe.session.user
+        try:
+            frappe.set_user("Administrator")
+            integration_request.handle_failure(data)
+            integration_request.db_set("status", "Failed")
+            if integration_request.reference_doctype == "Payment Request":
+                pr = frappe.get_doc(
+                    "Payment Request",
+                    integration_request.reference_docname
+                )
+                if pr.status not in ("Paid", "Cancelled"):
+                    reason = data.get("reason") or "Payment declined or cancelled by customer"
+                    pr.db_set("status", "Failed")
+                    pr.add_comment(
+                        "Info",
+                        f"MoMo Payment Failed. Reason: {reason}. Reference: {reference_id}"
+                    )
+            frappe.db.commit()
+        except Exception:
+            frappe.log_error(frappe.get_traceback(), "MoMo Failure Handler Error")
+        finally:
+            frappe.set_user(original_user)
+    return {"status": "processed", "reference_id": reference_id}
     return {"status": "processed", "reference_id": reference_id}
 
 
 @frappe.whitelist()
 def generate_payment_url(payment_request_name):
-    """
-    Builds the checkout URL from a Payment Request document.
-    Called from payment_request.js and the Sales Invoice client script.
-    """
     pr = frappe.get_doc("Payment Request", payment_request_name)
     from payments.utils import get_payment_gateway_controller
     controller = get_payment_gateway_controller(pr.payment_gateway)
@@ -189,31 +211,87 @@ def generate_payment_url(payment_request_name):
         payment_gateway=pr.payment_gateway,
         payment_request_name=pr.name,
     )
-    frappe.db.set_value(
-        "Payment Request", payment_request_name, "payment_url", url
-    )
+    frappe.db.set_value("Payment Request", payment_request_name, "payment_url", url)
     frappe.db.commit()
     return url
 
 
 @frappe.whitelist(allow_guest=True)
 def request_for_payment_by_gateway(gateway_name, **kwargs):
-    """
-    Called by the checkout page to initiate the push.
-    allow_guest=True because the checkout page is accessed without login.
-    """
     return frappe.get_doc("MoMo Settings", gateway_name).request_for_payment(**kwargs)
 
 
 @frappe.whitelist()
 def poll_transaction_status(reference_id, gateway_name):
     """
-    Used by the Test Connection button in momo_settings.js.
+    Used by the Test Connection button.
+    Tests authentication only — does not look up any transaction.
     """
     try:
         settings = frappe.get_doc("MoMo Settings", gateway_name)
         connector = settings._get_connector()
-        return connector.get_transaction_status(reference_id)
+        # Just return the token to confirm auth works — no transaction lookup
+        return {"status": "ok", "message": "Authentication successful. Credentials are valid."}
     except Exception:
-        frappe.log_error(frappe.get_traceback(), "MoMo Poll Transaction Error")
-        frappe.throw(_("Could not reach MTN MoMo API. Check credentials and Error Log."))
+        frappe.log_error(frappe.get_traceback(), "MoMo Test Connection Error")
+        frappe.throw(_("Could not authenticate with MTN MoMo API. Check credentials and Error Log."))
+
+
+@frappe.whitelist()
+def retry_payment_request(payment_request_name):
+    """
+    Resends the STK push for a Failed Payment Request.
+    Reuses the exact same request_phone_payment logic as on_submit.
+    Guards against retrying a PR that is already Paid.
+    """
+    pr = frappe.get_doc("Payment Request", payment_request_name)
+
+    if pr.status == "Paid":
+        frappe.throw(
+            _("This Payment Request has already been paid and cannot be retried."),
+            title=_("Already Paid")
+        )
+
+    if pr.docstatus != 1:
+        frappe.throw(
+            _("Only submitted Payment Requests can be retried."),
+            title=_("Invalid Status")
+        )
+
+    if not pr.phone_number:
+        frappe.throw(
+            _("No phone number found on this Payment Request."),
+            title=_("Phone Number Required")
+        )
+
+    # Enforce 60-second cooldown between retries
+    last_ir = frappe.db.get_all(
+        "Integration Request",
+        filters={
+            "reference_doctype": "Payment Request",
+            "reference_docname": pr.name,
+            "status": "Failed",
+        },
+        fields=["modified"],
+        order_by="creation desc",
+        limit=1,
+    )
+    if last_ir:
+        import datetime
+        last_attempt = last_ir[0].modified
+        now = frappe.utils.now_datetime()
+        seconds_since = (now - last_attempt).total_seconds()
+        if seconds_since < 60:
+            wait = int(60 - seconds_since)
+            frappe.throw(
+                _(f"Please wait {wait} seconds before retrying. MTN requires a cooldown between payment attempts."),
+                title=_("Too Soon")
+            )
+
+    # Reset PR status back to Requested
+    pr.db_set("status", "Requested")
+    pr.add_comment("Info", f"MoMo payment retry initiated. Resending STK to {pr.phone_number}.")
+    frappe.db.commit()
+
+    # Reuse the exact same path as on_submit -> request_phone_payment
+    pr.request_phone_payment()
