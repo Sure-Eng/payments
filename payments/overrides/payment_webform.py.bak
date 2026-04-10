@@ -23,11 +23,6 @@ class PaymentWebForm(WebForm):
 			frappe.throw(frappe._("Amount must be greater than 0."))
 
 	def get_payment_gateway_url(self, doc):
-		# --- Onige member registration delegation ---
-		if doc.doctype == "Member":
-			from onige_members.member_registration.registration_flow import get_payment_url_for_member
-			return get_payment_url_for_member(self, doc)
-		# --- end delegation ---
 		if getattr(self, "accept_payment", False):
 			controller = get_payment_gateway_controller(self.payment_gateway)
 
